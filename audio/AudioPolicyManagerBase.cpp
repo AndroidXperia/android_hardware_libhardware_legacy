@@ -1,6 +1,5 @@
 /*
  * Copyright (C) 2009 The Android Open Source Project
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,9 +30,6 @@
 #include <hardware/audio.h>
 #include <math.h>
 #include <hardware_legacy/audio_policy_conf.h>
-#ifdef QCOM_HARDWARE
-#include <stdio.h>
-#endif
 
 namespace android_audio_legacy {
 
@@ -149,7 +145,8 @@ status_t AudioPolicyManagerBase::setDeviceConnectionState(AudioSystem::audio_dev
             for (size_t i = 0; i < outputs.size(); i++) {
                 // close unused outputs after device disconnection or direct outputs that have been
                 // opened by checkOutputsForDevice() to query dynamic parameters
-                if ((state == AudioSystem::DEVICE_STATE_UNAVAILABLE))  {
+                if ((state == AudioSystem::DEVICE_STATE_UNAVAILABLE) ||
+                        (mOutputs.valueFor(outputs[i])->mFlags & AUDIO_OUTPUT_FLAG_DIRECT)) {
                     closeOutput(outputs[i]);
                 }
             }
@@ -462,7 +459,7 @@ AudioPolicyManagerBase::IOProfile *AudioPolicyManagerBase::getProfileForDirectOu
            IOProfile *profile = mHwModules[i]->mOutputProfiles[j];
            if (profile->isCompatibleProfile(device, samplingRate, format,
                                            channelMask,
-                                          (audio_output_flags_t)(flags|AUDIO_OUTPUT_FLAG_DIRECT))) {
+                                           AUDIO_OUTPUT_FLAG_DIRECT)) {
                if (mAvailableOutputDevices & profile->mSupportedDevices) {
                    return mHwModules[i]->mOutputProfiles[j];
                }
@@ -518,14 +515,11 @@ audio_io_handle_t AudioPolicyManagerBase::getOutput(AudioSystem::stream_type str
 #endif //AUDIO_POLICY_TEST
 
     // open a direct output if required by specified parameters
-    IOProfile *profile = NULL;
-    if (flags & AUDIO_OUTPUT_FLAG_DIRECT) {
-        profile = getProfileForDirectOutput(device,
-                                            samplingRate,
-                                            format,
-                                            channelMask,
-                                            (audio_output_flags_t)flags);
-    }
+    IOProfile *profile = getProfileForDirectOutput(device,
+                                                   samplingRate,
+                                                   format,
+                                                   channelMask,
+                                                   (audio_output_flags_t)flags);
     if (profile != NULL) {
 
         ALOGV("getOutput() opening direct output device %x", device);
@@ -791,12 +785,7 @@ audio_io_handle_t AudioPolicyManagerBase::getInput(int inputSource,
                                     uint32_t samplingRate,
                                     uint32_t format,
                                     uint32_t channelMask,
-#ifdef STE_AUDIO
-                                    AudioSystem::audio_in_acoustics acoustics,
-                                    audio_input_clients *inputClientId)
-#else
                                     AudioSystem::audio_in_acoustics acoustics)
-#endif
 {
     audio_io_handle_t input = 0;
     audio_devices_t device = getDeviceForInputSource(inputSource);
@@ -852,12 +841,7 @@ audio_io_handle_t AudioPolicyManagerBase::getInput(int inputSource,
                                     &inputDesc->mDevice,
                                     &inputDesc->mSamplingRate,
                                     &inputDesc->mFormat,
-#ifdef STE_AUDIO
-                                    &inputDesc->mChannelMask,
-                                    inputClientId);
-#else
                                     &inputDesc->mChannelMask);
-#endif
 
     // only accept input with the exact requested set of parameters
     if (input == 0 ||
@@ -988,10 +972,7 @@ status_t AudioPolicyManagerBase::setStreamVolumeIndex(AudioSystem::stream_type s
     for (size_t i = 0; i < mOutputs.size(); i++) {
         audio_devices_t curDevice =
                 getDeviceForVolume((audio_devices_t)mOutputs.valueAt(i)->device());
-#ifndef ICS_AUDIO_BLOB
-        if (device == curDevice)
-#endif
-        {
+        if (device == curDevice) {
             status_t volStatus = checkAndSetVolume(stream, index, mOutputs.keyAt(i), curDevice);
             if (volStatus != NO_ERROR) {
                 status = volStatus;
@@ -1008,7 +989,6 @@ status_t AudioPolicyManagerBase::getStreamVolumeIndex(AudioSystem::stream_type s
     if (index == NULL) {
         return BAD_VALUE;
     }
-#ifndef ICS_AUDIO_BLOB
     if (!audio_is_output_device(device)) {
         return BAD_VALUE;
     }
@@ -1020,9 +1000,6 @@ status_t AudioPolicyManagerBase::getStreamVolumeIndex(AudioSystem::stream_type s
     device = getDeviceForVolume(device);
 
     *index =  mStreams[stream].getVolumeIndex(device);
-#else
-    *index =  mStreams[stream].mIndexCur.valueAt(0);
-#endif
     ALOGV("getStreamVolumeIndex() stream %d device %08x index %d", stream, device, *index);
     return NO_ERROR;
 }
@@ -1265,25 +1242,6 @@ AudioPolicyManagerBase::AudioPolicyManagerBase(AudioPolicyClientInterface *clien
 {
     mpClientInterface = clientInterface;
 
-#ifdef QCOM_HARDWARE
-    //Check if HDMI is the primary interface
-    //In that case we need to route audio to HDMI
-    bool hdmi_as_primary = false;
-    const char* file = "/sys/class/graphics/fb0/hdmi_primary";
-    FILE* fp = fopen(file, "r");
-    if(fp) {
-        ALOGD("%s: HDMI is used as primary interface", __FUNCTION__);
-        hdmi_as_primary = true;
-        fclose(fp);
-    }
-
-    if(hdmi_as_primary) {
-        // If HDMI is used as primary then all audio should always be
-        // routed to HDMI by default. The connection can be assumed to
-        // be always ON. Overrideable by Bluetooth.
-        mAvailableOutputDevices = (audio_devices_t)(mAvailableOutputDevices | AUDIO_DEVICE_OUT_AUX_DIGITAL);
-    }
-#endif
     for (int i = 0; i < AudioSystem::NUM_FORCE_USE; i++) {
         mForceUse[i] = AudioSystem::FORCE_NONE;
     }
@@ -1293,18 +1251,9 @@ AudioPolicyManagerBase::AudioPolicyManagerBase(AudioPolicyClientInterface *clien
     mA2dpDeviceAddress = String8("");
     mScoDeviceAddress = String8("");
     mUsbCardAndDevice = String8("");
-#ifdef QCOM_HARDWARE
-    int is_mpq = 0;
-    IS_TARGET_MPQ(is_mpq);
-#endif
-    if (loadAudioPolicyConfig(AUDIO_POLICY_VENDOR_CONFIG_FILE) != NO_ERROR) {
 
-#ifdef QCOM_HARDWARE
-        if ((is_mpq && loadAudioPolicyConfig(AUDIO_POLICY_MPQ_CONFIG_FILE) != NO_ERROR) ||
-               (!is_mpq && loadAudioPolicyConfig(AUDIO_POLICY_CONFIG_FILE) != NO_ERROR)) {
-#else
+    if (loadAudioPolicyConfig(AUDIO_POLICY_VENDOR_CONFIG_FILE) != NO_ERROR) {
         if (loadAudioPolicyConfig(AUDIO_POLICY_CONFIG_FILE) != NO_ERROR) {
-#endif
             ALOGE("could not load audio policy configuration file, setting defaults");
             defaultAudioPolicyConfig();
         }
@@ -1321,8 +1270,8 @@ AudioPolicyManagerBase::AudioPolicyManagerBase(AudioPolicyClientInterface *clien
         for (size_t j = 0; j < mHwModules[i]->mOutputProfiles.size(); j++)
         {
             const IOProfile *outProfile = mHwModules[i]->mOutputProfiles[j];
-            if ( (outProfile->mSupportedDevices & mAttachedOutputDevices) &&
-                  !(outProfile->mFlags & AUDIO_OUTPUT_FLAG_DIRECT) ){
+
+            if (outProfile->mSupportedDevices & mAttachedOutputDevices) {
                 AudioOutputDescriptor *outputDesc = new AudioOutputDescriptor(outProfile);
                 outputDesc->mDevice = (audio_devices_t)(mDefaultOutputDevice &
                                                             outProfile->mSupportedDevices);
@@ -1624,19 +1573,6 @@ status_t AudioPolicyManagerBase::checkOutputsForDevice(audio_devices_t device,
             ALOGV("opening output for device %08x", device);
             desc = new AudioOutputDescriptor(profile);
             desc->mDevice = device;
-#ifdef QCOM_HARDWARE
-            audio_io_handle_t output = 0;
-            if (!(desc->mFlags & AUDIO_OUTPUT_FLAG_LPA || desc->mFlags & AUDIO_OUTPUT_FLAG_TUNNEL ||
-                desc->mFlags & AUDIO_OUTPUT_FLAG_VOIP_RX)) {
-                output =  mpClientInterface->openOutput(profile->mModule->mHandle,
-                                                        &desc->mDevice,
-                                                        &desc->mSamplingRate,
-                                                        &desc->mFormat,
-                                                        &desc->mChannelMask,
-                                                        &desc->mLatency,
-                                                        desc->mFlags);
-            }
-#else
             audio_io_handle_t output = mpClientInterface->openOutput(profile->mModule->mHandle,
                                                                        &desc->mDevice,
                                                                        &desc->mSamplingRate,
@@ -1644,7 +1580,6 @@ status_t AudioPolicyManagerBase::checkOutputsForDevice(audio_devices_t device,
                                                                        &desc->mChannelMask,
                                                                        &desc->mLatency,
                                                                        desc->mFlags);
-#endif
             if (output != 0) {
                 if (desc->mFlags & AUDIO_OUTPUT_FLAG_DIRECT) {
                     String8 reply;
@@ -2058,9 +1993,6 @@ AudioPolicyManagerBase::routing_strategy AudioPolicyManagerBase::getStrategy(
         // while key clicks are played produces a poor result
     case AudioSystem::TTS:
     case AudioSystem::MUSIC:
-#ifdef QCOM_FM_ENABLED
-    case AudioSystem::FM:
-#endif
         return STRATEGY_MEDIA;
     case AudioSystem::ENFORCED_AUDIBLE:
         return STRATEGY_ENFORCED_AUDIBLE;
@@ -2430,9 +2362,7 @@ audio_devices_t AudioPolicyManagerBase::getDeviceForInputSource(int inputSource)
     case AUDIO_SOURCE_DEFAULT:
     case AUDIO_SOURCE_MIC:
     case AUDIO_SOURCE_VOICE_RECOGNITION:
-#ifndef QCOM_HARDWARE
     case AUDIO_SOURCE_VOICE_COMMUNICATION:
-#endif
         if (mForceUse[AudioSystem::FOR_RECORD] == AudioSystem::FORCE_BT_SCO &&
             mAvailableInputDevices & AudioSystem::DEVICE_IN_BLUETOOTH_SCO_HEADSET) {
             device = AudioSystem::DEVICE_IN_BLUETOOTH_SCO_HEADSET;
@@ -2442,11 +2372,6 @@ audio_devices_t AudioPolicyManagerBase::getDeviceForInputSource(int inputSource)
             device = AudioSystem::DEVICE_IN_BUILTIN_MIC;
         }
         break;
-#ifdef QCOM_HARDWARE
-   case AUDIO_SOURCE_VOICE_COMMUNICATION:
-        device = AudioSystem::DEVICE_IN_COMMUNICATION;
-        break;
-#endif
     case AUDIO_SOURCE_CAMCORDER:
         if (mAvailableInputDevices & AudioSystem::DEVICE_IN_BACK_MIC) {
             device = AudioSystem::DEVICE_IN_BACK_MIC;
@@ -2517,9 +2442,6 @@ AudioPolicyManagerBase::device_category AudioPolicyManagerBase::getDeviceCategor
         case AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET:
         case AUDIO_DEVICE_OUT_BLUETOOTH_A2DP:
         case AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES:
-#if defined(QCOM_FM_ENABLED) || defined(STE_FM)
-        case AUDIO_DEVICE_OUT_FM:
-#endif
             return DEVICE_CATEGORY_HEADSET;
         case AUDIO_DEVICE_OUT_SPEAKER:
         case AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT:
@@ -2527,9 +2449,6 @@ AudioPolicyManagerBase::device_category AudioPolicyManagerBase::getDeviceCategor
         case AUDIO_DEVICE_OUT_AUX_DIGITAL:
         case AUDIO_DEVICE_OUT_USB_ACCESSORY:
         case AUDIO_DEVICE_OUT_USB_DEVICE:
-#ifdef QCOM_HARDWARE
-        case AUDIO_DEVICE_OUT_PROXY:
-#endif
         default:
             return DEVICE_CATEGORY_SPEAKER;
     }
@@ -2668,14 +2587,6 @@ const AudioPolicyManagerBase::VolumeCurvePoint
         sSpeakerMediaVolumeCurve, // DEVICE_CATEGORY_SPEAKER
         sDefaultMediaVolumeCurve  // DEVICE_CATEGORY_EARPIECE
     },
-#ifdef QCOM_FM_ENABLED
-    { // AUDIO_STREAM_FM
-        sDefaultMediaVolumeCurve, // DEVICE_CATEGORY_HEADSET
-        sSpeakerMediaVolumeCurve, // DEVICE_CATEGORY_SPEAKER
-        sDefaultMediaVolumeCurve  // DEVICE_CATEGORY_EARPIECE
-    },
-#endif
-
 };
 
 void AudioPolicyManagerBase::initializeVolumeCurves()
@@ -3283,9 +3194,6 @@ bool AudioPolicyManagerBase::IOProfile::isCompatibleProfile(audio_devices_t devi
             return false;
         }
     }
-    ALOGE(" profile found: device %x, flags %x, samplingrate %d,\
-            format %x, channelMask %d",
-            device, flags, samplingRate, format, channelMask);
     return true;
 }
 
@@ -3349,23 +3257,13 @@ const struct StringToEnum sDeviceNameToEnumTable[] = {
     STRING_TO_ENUM(AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET),
     STRING_TO_ENUM(AUDIO_DEVICE_OUT_USB_DEVICE),
     STRING_TO_ENUM(AUDIO_DEVICE_OUT_USB_ACCESSORY),
-#if defined(QCOM_FM_ENABLED) || defined(STE_FM)
-    STRING_TO_ENUM(AUDIO_DEVICE_OUT_FM),
-    STRING_TO_ENUM(AUDIO_DEVICE_OUT_FM_TX),
-#endif
     STRING_TO_ENUM(AUDIO_DEVICE_OUT_ALL_USB),
-#ifdef QCOM_HARDWARE
-    STRING_TO_ENUM(AUDIO_DEVICE_OUT_PROXY),
-#endif
     STRING_TO_ENUM(AUDIO_DEVICE_IN_BUILTIN_MIC),
     STRING_TO_ENUM(AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET),
     STRING_TO_ENUM(AUDIO_DEVICE_IN_WIRED_HEADSET),
     STRING_TO_ENUM(AUDIO_DEVICE_IN_AUX_DIGITAL),
     STRING_TO_ENUM(AUDIO_DEVICE_IN_VOICE_CALL),
     STRING_TO_ENUM(AUDIO_DEVICE_IN_BACK_MIC),
-#ifdef QCOM_HARDWARE
-    STRING_TO_ENUM(AUDIO_DEVICE_IN_COMMUNICATION),
-#endif
 };
 
 const struct StringToEnum sFlagNameToEnumTable[] = {
@@ -3373,48 +3271,19 @@ const struct StringToEnum sFlagNameToEnumTable[] = {
     STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_PRIMARY),
     STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_FAST),
     STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_DEEP_BUFFER),
-#ifdef QCOM_HARDWARE
-    STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_VOIP_RX),
-    STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_LPA),
-    STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_TUNNEL),
-#endif
 };
 
 const struct StringToEnum sFormatNameToEnumTable[] = {
     STRING_TO_ENUM(AUDIO_FORMAT_PCM_16_BIT),
     STRING_TO_ENUM(AUDIO_FORMAT_PCM_8_BIT),
     STRING_TO_ENUM(AUDIO_FORMAT_MP3),
-#ifdef QCOM_HARDWARE
-    STRING_TO_ENUM(AUDIO_FORMAT_AMR_NB),
-    STRING_TO_ENUM(AUDIO_FORMAT_EVRC),
-    STRING_TO_ENUM(AUDIO_FORMAT_QCELP),
-#endif
     STRING_TO_ENUM(AUDIO_FORMAT_AAC),
     STRING_TO_ENUM(AUDIO_FORMAT_VORBIS),
-#ifdef QCOM_HARDWARE
-    STRING_TO_ENUM(AUDIO_FORMAT_AMR_NB),
-    STRING_TO_ENUM(AUDIO_FORMAT_AMR_WB),
-    STRING_TO_ENUM(AUDIO_FORMAT_QCELP),
-    STRING_TO_ENUM(AUDIO_FORMAT_EVRC),
-    STRING_TO_ENUM(AUDIO_FORMAT_AC3),
-    STRING_TO_ENUM(AUDIO_FORMAT_EAC3),
-    STRING_TO_ENUM(AUDIO_FORMAT_DTS),
-    STRING_TO_ENUM(AUDIO_FORMAT_WMA),
-    STRING_TO_ENUM(AUDIO_FORMAT_WMA_PRO),
-    STRING_TO_ENUM(AUDIO_FORMAT_AAC_ADIF),
-    STRING_TO_ENUM(AUDIO_FORMAT_EVRCB),
-    STRING_TO_ENUM(AUDIO_FORMAT_EVRCWB),
-#endif
 };
 
 const struct StringToEnum sOutChannelsNameToEnumTable[] = {
     STRING_TO_ENUM(AUDIO_CHANNEL_OUT_MONO),
     STRING_TO_ENUM(AUDIO_CHANNEL_OUT_STEREO),
-#ifdef QCOM_HARDWARE
-    STRING_TO_ENUM(AUDIO_CHANNEL_OUT_QUAD),
-    STRING_TO_ENUM(AUDIO_CHANNEL_OUT_SURROUND),
-    STRING_TO_ENUM(AUDIO_CHANNEL_OUT_PENTA),
-#endif
     STRING_TO_ENUM(AUDIO_CHANNEL_OUT_5POINT1),
     STRING_TO_ENUM(AUDIO_CHANNEL_OUT_7POINT1),
 };
